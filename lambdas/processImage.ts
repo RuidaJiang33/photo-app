@@ -7,8 +7,11 @@ import {
   S3Client,
   PutObjectCommand,
 } from "@aws-sdk/client-s3";
+import { DynamoDBClient, PutItemCommand, PutItemCommandInput } from "@aws-sdk/client-dynamodb";
 
 const s3 = new S3Client();
+const dynamoDBClient = new DynamoDBClient({ region: "eu-west-1" });
+const dynamoDBTableName = "Photos";
 
 export const handler: SQSHandler = async (event) => {
   console.log("Event ", JSON.stringify(event));
@@ -31,9 +34,31 @@ export const handler: SQSHandler = async (event) => {
             Key: srcKey,
           };
           origimage = await s3.send(new GetObjectCommand(params));
+
+          if (!srcKey) {
+            throw new Error("Source key is undefined");
+          }
+
+          // Check file extension
+          const fileExtension = srcKey.split(".").pop().toLowerCase();
+          if (fileExtension !== "jpeg" && fileExtension !== "png") {
+            throw new Error(`Invalid file type: ${fileExtension}`);
+          }
+
+          // Write item to DynamoDB
+          const dynamoDBParams: PutItemCommandInput = {
+            TableName: dynamoDBTableName,
+            Item: {
+              "imageId": { S: srcKey },
+              "fileExtension": { S: fileExtension }
+            }
+          };
+          await dynamoDBClient.send(new PutItemCommand(dynamoDBParams));
+          
           // Process the image ......
         } catch (error) {
           console.log(error);
+          throw error;
         }
       }
     }

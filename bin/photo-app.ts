@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import "source-map-support/register";
 import * as cdk from "aws-cdk-lib";
-import { EDAAppStack } from "../lib/eda-app-stack";
+import { PhotoAppStack } from "../lib/photo-app-stack";
 
 const app = new cdk.App();
-new EDAAppStack(app, "EDAStack", {
+new PhotoAppStack(app, "PhotoAppStack", {
   env: { region: "eu-west-1" },
 });

@@ -8,11 +8,14 @@ import * as sqs from "aws-cdk-lib/aws-sqs";
 import * as sns from "aws-cdk-lib/aws-sns";
 import * as subs from "aws-cdk-lib/aws-sns-subscriptions";
 import * as iam from "aws-cdk-lib/aws-iam";
+import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
+import { Duration, RemovalPolicy } from "aws-cdk-lib";
+import { SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
 
 import { Construct } from "constructs";
 // import * as sqs from 'aws-cdk-lib/aws-sqs';
 
-export class EDAAppStack extends cdk.Stack {
+export class PhotoAppStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
@@ -26,8 +29,16 @@ export class EDAAppStack extends cdk.Stack {
       receiveMessageWaitTime: cdk.Duration.seconds(10),
     });
 
+    const mailerDLQ = new sqs.Queue(this, "mailer-dlq", {
+      retentionPeriod: cdk.Duration.minutes(30),
+    });
+
     const mailerQ = new sqs.Queue(this, "mailer-queue", {
       receiveMessageWaitTime: cdk.Duration.seconds(10),
+      deadLetterQueue: {
+        queue: mailerDLQ,
+        maxReceiveCount: 2,
+      },
     });
 
     const newImageTopic = new sns.Topic(this, "NewImageTopic", {
@@ -54,17 +65,20 @@ export class EDAAppStack extends cdk.Stack {
       entry: `${__dirname}/../lambdas/mailer.ts`,
     });
 
+
+    // Subscribe mailer function directly to the DLQ
+    mailerDLQ.grantConsumeMessages(mailerFn);
+
     // S3 --> SQS
     imagesBucket.addEventNotification(
       s3.EventType.OBJECT_CREATED,
       new s3n.SnsDestination(newImageTopic)  // Changed
     );
 
-    newImageTopic.addSubscription(
-      new subs.SqsSubscription(imageProcessQueue)
-    );
+    newImageTopic.addSubscription(new subs.SqsSubscription(imageProcessQueue));
 
     newImageTopic.addSubscription(new subs.SqsSubscription(mailerQ));
+    
 
     // SQS --> Lambda
     const newImageEventSource = new events.SqsEventSource(imageProcessQueue, {
@@ -91,14 +105,23 @@ export class EDAAppStack extends cdk.Stack {
       })
     );
 
-    // Permissions
+    // DynamoDB Table
+    const imageItemsTable = new dynamodb.Table(this, "ImageItemsTable", {
+      partitionKey: { name: "imageId", type: dynamodb.AttributeType.STRING },
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
 
+    // Permissions
     imagesBucket.grantRead(processImageFn);
+    imageItemsTable.grantWriteData(processImageFn);
 
     // Output
 
     new cdk.CfnOutput(this, "bucketName", {
       value: imagesBucket.bucketName,
+    });
+    new cdk.CfnOutput(this, "imageItemsTableName", {
+      value: imageItemsTable.tableName,
     });
   }
 }
