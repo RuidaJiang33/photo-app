@@ -25,9 +25,9 @@ export const handler: SQSHandler = async (event) => {
 
         // Check file extension
         const fileExtension = getFileExtension(srcKey);
-          if (!isValidImageExtension(fileExtension)) {
-            await notifyError(srcKey, new Error(`Invalid file type: ${fileExtension}`));
-          }
+        if (!isValidImageExtension(fileExtension)) {
+          await notifyError(srcKey, new Error(`Invalid file type: ${fileExtension}`));
+        }
         try {
           // Write item to DynamoDB
           await writeToDynamoDB(srcKey, fileExtension);

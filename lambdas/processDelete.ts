@@ -9,6 +9,7 @@ export const handler: SNSHandler = async (event) => {
 
   for (const record of event.Records) {
   const snsMessage = JSON.parse(record.Sns.Message);
+  
     if (snsMessage.Records) {
       for (const messageRecord of snsMessage.Records) {
         const s3Event = messageRecord.s3;
@@ -22,7 +23,8 @@ export const handler: SNSHandler = async (event) => {
             console.error("Error deleting DynamoDB: ", error);
             throw error;
         }
-      }
+    }
+    
     }
   }
 };

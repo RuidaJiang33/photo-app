@@ -146,8 +146,10 @@ export class PhotoAppStack extends cdk.Stack {
 
     // Subscribes
     handleImageTopic.addSubscription(new subs.SqsSubscription(imageProcessQueue));
-    handleImageTopic.addSubscription(
-      new subs.LambdaSubscription(processDeleteFn));
+
+    handleImageTopic.addSubscription(new subs.LambdaSubscription(confirmationMailerFn));
+
+    handleImageTopic.addSubscription(new subs.LambdaSubscription(processDeleteFn));
 
     handleImageTopic.addSubscription(
       new subs.LambdaSubscription(updateTableFn, {
@@ -190,6 +192,7 @@ export class PhotoAppStack extends cdk.Stack {
     confirmationMailerFn.addToRolePolicy(sesPolicy);
     rejectionMailerFn.addToRolePolicy(sesPolicy);
     deleteMailerFn.addToRolePolicy(sesPolicy);
+
     
     const sqsSendMessagePolicy = new iam.PolicyStatement({
       actions: ['sqs:SendMessage'],
@@ -198,6 +201,7 @@ export class PhotoAppStack extends cdk.Stack {
     });
     processImageFn.addToRolePolicy(sqsSendMessagePolicy);
 
+
     const snsPolicy = new iam.PolicyStatement({
       actions: ['sns:ReceiveMessage', 'sns:GetTopicAttributes'],
       resources: [handleImageTopic.topicArn],
@@ -205,17 +209,7 @@ export class PhotoAppStack extends cdk.Stack {
     updateTableFn.addToRolePolicy(snsPolicy);
     updateTableFn.addEnvironment("TOPIC_ARN", handleImageTopic.topicArn);
 
-    const logPolicy = new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: [
-        "logs:CreateLogGroup",
-        "logs:CreateLogStream",
-        "logs:PutLogEvents"
-      ],
-      resources: [`arn:aws:logs:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:*`]
-    });
-    deleteMailerFn.addToRolePolicy(logPolicy);
-    processImageFn.addToRolePolicy(logPolicy);
+  
 
     // Permissions
     imagesBucket.grantRead(processImageFn);
@@ -224,8 +218,8 @@ export class PhotoAppStack extends cdk.Stack {
     imageItemsTable.grantReadWriteData(processDeleteFn);
     imageItemsTable.grantReadWriteData(updateTableFn);
 
-    // Output
 
+    // Output
     new cdk.CfnOutput(this, "bucketName", {
       value: imagesBucket.bucketName,
     });
