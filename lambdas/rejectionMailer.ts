@@ -11,23 +11,23 @@ const client = new SESClient({ region: SES_REGION });
 export const handler: SQSHandler = async (event) => {
   console.log("Event: ", JSON.stringify(event));
   for (const record of event.Records) {
-    const recordBody = JSON.parse(record.body);
-    const snsMessage = JSON.parse(recordBody.Message);
+    let snsMessage;
+    try {
+      snsMessage = JSON.parse(record.body);
+      console.log("Parsed message:", snsMessage);
+    } catch (error) {
+      console.error("ERROR parsing JSON:", error, "Data:", record.body);
+      continue; // Skip this iteration if parsing fails
+    }
 
-    if (snsMessage.Records) {
-      for (const messageRecord of snsMessage.Records) {
-        const s3e = messageRecord.s3;
-        const srcBucket = s3e.bucket.name;
-        const srcKey = decodeURIComponent(s3e.object.key.replace(/\+/g, " "));
-
-        try {
-          const message = `Your image has been successfully uploaded. Its URL is s3://${srcBucket}/${srcKey}`;
-          const params = sendEmailParams("Image Upload Confirmation", message);
-          await client.send(new SendEmailCommand(params));
-        } catch (error) {
-          console.error("ERROR: ", error);
-        }
-      }
+    if (snsMessage.error && snsMessage.error.message) {
+        const subject = "Image Upload Rejection";
+        const message = `Your image upload has been rejected due to unsupported file type. Only JPEG and PNG are allowed.`;
+        const params = sendEmailParams(subject, message);
+        console.log("Sending rejection email with params:", params);
+        await client.send(new SendEmailCommand(params));
+    } else {
+      console.log("No error message found in the record, or not a rejection case");
     }
   }
 };

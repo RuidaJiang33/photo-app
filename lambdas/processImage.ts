@@ -2,16 +2,16 @@
 import { SQSHandler } from "aws-lambda";
 import {
   GetObjectCommand,
-  PutObjectCommandInput,
-  GetObjectCommandInput,
   S3Client,
-  PutObjectCommand,
 } from "@aws-sdk/client-s3";
-import { DynamoDBClient, PutItemCommand, PutItemCommandInput } from "@aws-sdk/client-dynamodb";
+import { DynamoDBClient, PutItemCommand } from "@aws-sdk/client-dynamodb";
+import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
 
 const s3 = new S3Client();
-const dynamoDBClient = new DynamoDBClient({ region: "eu-west-1" });
-const dynamoDBTableName = "Photos";
+const sqsClient = new SQSClient({ region: process.env.REGION });
+const dynamoDBClient = new DynamoDBClient({ region: process.env.REGION });
+const dynamoDBTableName = process.env.TABLE_NAME;
+const dlqUrl = process.env.DLQ_URL;
 
 export const handler: SQSHandler = async (event) => {
   console.log("Event ", JSON.stringify(event));
@@ -20,47 +20,63 @@ export const handler: SQSHandler = async (event) => {
     const snsMessage = JSON.parse(recordBody.Message); // Parse SNS message
 
     if (snsMessage.Records) {
-      console.log("Record body ", JSON.stringify(snsMessage));
+      console.log("Processing S3 event records: ", JSON.stringify(snsMessage.Records));
       for (const messageRecord of snsMessage.Records) {
-        const s3e = messageRecord.s3;
-        const srcBucket = s3e.bucket.name;
-        // Object key may have spaces or unicode non-ASCII characters.
-        const srcKey = decodeURIComponent(s3e.object.key.replace(/\+/g, " "));
-        let origimage = null;
+        const s3Event = messageRecord.s3;
+        const srcBucket = s3Event.bucket.name;
+        const srcKey = decodeURIComponent(s3Event.object.key.replace(/\+/g, " "));
+
         try {
-          // Download the image from the S3 source bucket.
-          const params: GetObjectCommandInput = {
-            Bucket: srcBucket,
-            Key: srcKey,
-          };
-          origimage = await s3.send(new GetObjectCommand(params));
-
-          if (!srcKey) {
-            throw new Error("Source key is undefined");
-          }
-
           // Check file extension
-          const fileExtension = srcKey.split(".").pop().toLowerCase();
-          if (fileExtension !== "jpeg" && fileExtension !== "png") {
+          const fileExtension = getFileExtension(srcKey);
+          if (!isValidImageExtension(fileExtension)) {
             throw new Error(`Invalid file type: ${fileExtension}`);
           }
 
           // Write item to DynamoDB
-          const dynamoDBParams: PutItemCommandInput = {
-            TableName: dynamoDBTableName,
-            Item: {
-              "imageId": { S: srcKey },
-              "fileExtension": { S: fileExtension }
-            }
-          };
-          await dynamoDBClient.send(new PutItemCommand(dynamoDBParams));
-          
-          // Process the image ......
+          await writeToDynamoDB(srcKey, fileExtension);
+
+          // Optionally, process the image further if needed
+          console.log(`Processed image with key: ${srcKey}`);
         } catch (error) {
-          console.log(error);
+          await notifyError(srcKey, error);
           throw error;
         }
       }
     }
   }
+
 };
+
+function getFileExtension(filename) {
+  return filename.split(".").pop().toLowerCase();
+}
+
+function isValidImageExtension(extension) {
+  return ['jpeg', 'png'].includes(extension);
+}
+
+async function writeToDynamoDB(key, extension) {
+  const params = {
+    TableName: dynamoDBTableName,
+    Item: {
+      "imageId": { S: key },
+      "fileExtension": { S: extension }
+    }
+  };
+  await dynamoDBClient.send(new PutItemCommand(params));
+}
+
+async function notifyError(key, error) {
+  const errorMessage = JSON.stringify({
+    key,
+    error: {
+      message: error.message
+    },
+    timestamp: new Date().toISOString()
+  });
+  await sqsClient.send(new SendMessageCommand({
+    QueueUrl: dlqUrl,
+    MessageBody: errorMessage
+  }));
+}
