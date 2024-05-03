@@ -1,9 +1,6 @@
 /* eslint-disable import/extensions, import/no-absolute-path */
 import { SQSHandler } from "aws-lambda";
-import {
-  GetObjectCommand,
-  S3Client,
-} from "@aws-sdk/client-s3";
+import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { DynamoDBClient, PutItemCommand } from "@aws-sdk/client-dynamodb";
 import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
 
@@ -26,17 +23,14 @@ export const handler: SQSHandler = async (event) => {
         const srcBucket = s3Event.bucket.name;
         const srcKey = decodeURIComponent(s3Event.object.key.replace(/\+/g, " "));
 
-        try {
-          // Check file extension
-          const fileExtension = getFileExtension(srcKey);
+        // Check file extension
+        const fileExtension = getFileExtension(srcKey);
           if (!isValidImageExtension(fileExtension)) {
-            throw new Error(`Invalid file type: ${fileExtension}`);
+            await notifyError(srcKey, new Error(`Invalid file type: ${fileExtension}`));
           }
-
+        try {
           // Write item to DynamoDB
           await writeToDynamoDB(srcKey, fileExtension);
-
-          // Optionally, process the image further if needed
           console.log(`Processed image with key: ${srcKey}`);
         } catch (error) {
           await notifyError(srcKey, error);

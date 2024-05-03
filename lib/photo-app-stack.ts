@@ -10,6 +10,8 @@ import * as subs from "aws-cdk-lib/aws-sns-subscriptions";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import { SES_EMAIL_FROM, SES_EMAIL_TO, SES_REGION } from "../env";
+import { DynamoEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
+import { StartingPosition } from "aws-cdk-lib/aws-lambda";
 
 import { Construct } from "constructs";
 // import * as sqs from 'aws-cdk-lib/aws-sqs';
@@ -22,14 +24,17 @@ export class PhotoAppStack extends cdk.Stack {
     const imageItemsTable = new dynamodb.Table(this, "ImageItemsTable", {
       partitionKey: { name: "imageId", type: dynamodb.AttributeType.STRING },
       removalPolicy: cdk.RemovalPolicy.DESTROY,
+      stream: dynamodb.StreamViewType.NEW_AND_OLD_IMAGES
     });
 
+    // Bucket
     const imagesBucket = new s3.Bucket(this, "images", {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       autoDeleteObjects: true,
       publicReadAccess: false,
     });
 
+    // Queue
     const imageProcessQueue = new sqs.Queue(this, "img-created-queue", {
       receiveMessageWaitTime: cdk.Duration.seconds(10),
     });
@@ -38,12 +43,12 @@ export class PhotoAppStack extends cdk.Stack {
       retentionPeriod: cdk.Duration.minutes(30),
     });
 
-    const newImageTopic = new sns.Topic(this, "NewImageTopic", {
-      displayName: "New Image topic",
+    // Topic
+    const handleImageTopic = new sns.Topic(this, "HandleImageTopic", {
+      displayName: "Handle Image topic",
     });
 
     // Lambda functions
-
     const processImageFn = new lambdanode.NodejsFunction(
       this,
       "ProcessImageFn",
@@ -56,6 +61,36 @@ export class PhotoAppStack extends cdk.Stack {
           TABLE_NAME: imageItemsTable.tableName,
           REGION: 'eu-west-1',
           DLQ_URL: mailerDLQ.queueUrl,
+        }
+      }
+    );
+
+    const processDeleteFn = new lambdanode.NodejsFunction(
+      this,
+      "ProcessDeleteFn",
+      {
+        runtime: lambda.Runtime.NODEJS_18_X,
+        entry: `${__dirname}/../lambdas/processDelete.ts`,
+        timeout: cdk.Duration.seconds(15),
+        memorySize: 128,
+        environment: {
+          TABLE_NAME: imageItemsTable.tableName,
+          REGION: 'eu-west-1',
+        }
+      }
+    );
+
+    const updateTableFn = new lambdanode.NodejsFunction(
+      this,
+      "UpdateTableFn",
+      {
+        runtime: lambda.Runtime.NODEJS_18_X,
+        entry: `${__dirname}/../lambdas/updateTable.ts`,
+        timeout: cdk.Duration.seconds(15),
+        memorySize: 128,
+        environment: {
+          TABLE_NAME: imageItemsTable.tableName,
+          REGION: 'eu-west-1',
         }
       }
     );
@@ -84,15 +119,45 @@ export class PhotoAppStack extends cdk.Stack {
       memorySize: 256,
     });
 
+    const deleteMailerFn = new lambdanode.NodejsFunction(this, "DeleteMailerFn", {
+      runtime: lambda.Runtime.NODEJS_18_X,
+      entry: `${__dirname}/../lambdas/deleteMailer.ts`,
+      environment: {
+        SES_EMAIL_FROM: SES_EMAIL_FROM,
+        SES_EMAIL_TO: SES_EMAIL_TO,
+        SES_REGION: SES_REGION
+      },
+      timeout: cdk.Duration.seconds(10),
+      memorySize: 256,
+    });
+
 
     // S3 --> SQS
     imagesBucket.addEventNotification(
       s3.EventType.OBJECT_CREATED,
-      new s3n.SnsDestination(newImageTopic)  // Changed
+      new s3n.SnsDestination(handleImageTopic)
     );
 
-    newImageTopic.addSubscription(new subs.SqsSubscription(imageProcessQueue));
+    imagesBucket.addEventNotification(
+      s3.EventType.OBJECT_REMOVED_DELETE,
+      new s3n.SnsDestination(handleImageTopic)
+    );
+    
 
+    // Subscribes
+    handleImageTopic.addSubscription(new subs.SqsSubscription(imageProcessQueue));
+    handleImageTopic.addSubscription(
+      new subs.LambdaSubscription(processDeleteFn));
+
+    handleImageTopic.addSubscription(
+      new subs.LambdaSubscription(updateTableFn, {
+        filterPolicy: {
+          comment_type: sns.SubscriptionFilter.stringFilter({
+            allowlist: ["Caption"]
+          })
+        },
+      })
+    );
     
 
     // SQS --> Lambda
@@ -105,6 +170,18 @@ export class PhotoAppStack extends cdk.Stack {
     }));
 
 
+    // DynamoDB --> Lambda
+    deleteMailerFn.addEventSource(
+      new DynamoEventSource(imageItemsTable, {
+        startingPosition: StartingPosition.TRIM_HORIZON,
+        batchSize: 5,
+        bisectBatchOnError: true,
+        retryAttempts: 2,
+        enabled: true,
+      })
+    );
+
+
     // Set up IAM permissions
     const sesPolicy = new iam.PolicyStatement({
       actions: ["ses:SendEmail", "ses:SendRawEmail"],
@@ -112,6 +189,7 @@ export class PhotoAppStack extends cdk.Stack {
     });
     confirmationMailerFn.addToRolePolicy(sesPolicy);
     rejectionMailerFn.addToRolePolicy(sesPolicy);
+    deleteMailerFn.addToRolePolicy(sesPolicy);
     
     const sqsSendMessagePolicy = new iam.PolicyStatement({
       actions: ['sqs:SendMessage'],
@@ -120,10 +198,31 @@ export class PhotoAppStack extends cdk.Stack {
     });
     processImageFn.addToRolePolicy(sqsSendMessagePolicy);
 
+    const snsPolicy = new iam.PolicyStatement({
+      actions: ['sns:ReceiveMessage', 'sns:GetTopicAttributes'],
+      resources: [handleImageTopic.topicArn],
+    });
+    updateTableFn.addToRolePolicy(snsPolicy);
+    updateTableFn.addEnvironment("TOPIC_ARN", handleImageTopic.topicArn);
+
+    const logPolicy = new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      resources: [`arn:aws:logs:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:*`]
+    });
+    deleteMailerFn.addToRolePolicy(logPolicy);
+    processImageFn.addToRolePolicy(logPolicy);
 
     // Permissions
     imagesBucket.grantRead(processImageFn);
+    imagesBucket.grantRead(processDeleteFn);
     imageItemsTable.grantWriteData(processImageFn);
+    imageItemsTable.grantReadWriteData(processDeleteFn);
+    imageItemsTable.grantReadWriteData(updateTableFn);
 
     // Output
 
@@ -132,6 +231,9 @@ export class PhotoAppStack extends cdk.Stack {
     });
     new cdk.CfnOutput(this, "imageItemsTableName", {
       value: imageItemsTable.tableName,
+    });
+    new cdk.CfnOutput(this, "handleImageTopicArn", {
+      value: handleImageTopic.topicArn,
     });
   }
 }
